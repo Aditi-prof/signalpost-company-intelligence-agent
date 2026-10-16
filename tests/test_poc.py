@@ -110,6 +110,91 @@ class ExternalFootprintTests(unittest.TestCase):
         self.assertIn("missing evidence span", reasons)
         self.assertIn("source rights are not approved", reasons)
 
+    def test_external_evaluator_publishes_valid_observations_and_fails_wrong_entity(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            profiles = root / "profiles.jsonl"
+            profiles.write_text(
+                json.dumps({"organisation_number": "923609016"}) + "\n",
+                encoding="utf-8",
+            )
+            valid = self.observation(
+                id="valid-observation",
+                platform="news",
+                signal_type="public_mention",
+                source_url="https://news.example/story",
+                source_class="public_news",
+                evidence_span="Example AS announced a new contract.",
+            )
+            rejected = self.observation(
+                id="rights-rejected-observation",
+                rights_status="review_required",
+            )
+
+            def run_evaluator(name, observations, labels):
+                observations_path = root / f"{name}-observations.jsonl"
+                labels_path = root / f"{name}-labels.jsonl"
+                output_path = root / f"{name}-report.json"
+                observations_path.write_text(
+                    "".join(json.dumps(item) + "\n" for item in observations),
+                    encoding="utf-8",
+                )
+                labels_path.write_text(
+                    "".join(json.dumps(item) + "\n" for item in labels),
+                    encoding="utf-8",
+                )
+                subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / "scripts" / "evaluate_external_footprint.py"),
+                        "--profiles",
+                        str(profiles),
+                        "--observations",
+                        str(observations_path),
+                        "--labels",
+                        str(labels_path),
+                        "--output",
+                        str(output_path),
+                        "--minimum-audit",
+                        "1",
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return json.loads(output_path.read_text(encoding="utf-8"))
+
+            self.assertTrue(publishable_observation(valid))
+            self.assertFalse(publishable_observation(rejected))
+            accepted_report = run_evaluator(
+                "rights-gate",
+                [valid, rejected],
+                [
+                    {"id": valid["id"], "exact_entity": True, "metric_correct": True},
+                    {"id": rejected["id"], "exact_entity": True, "metric_correct": True},
+                ],
+            )
+            self.assertEqual(accepted_report["observations"], 2)
+            self.assertEqual(accepted_report["audited_observations"], 2)
+            self.assertEqual(accepted_report["published_audited"], 1)
+            self.assertEqual(accepted_report["wrong_entity_publications"], 0)
+            self.assertEqual(accepted_report["entity_precision"], 1.0)
+            self.assertEqual(accepted_report["metric_precision"], 1.0)
+            self.assertTrue(accepted_report["audit_size_gate"])
+            self.assertTrue(accepted_report["qualification_passed"])
+
+            wrong_entity_report = run_evaluator(
+                "wrong-entity",
+                [valid],
+                [{"id": valid["id"], "exact_entity": False, "metric_correct": True}],
+            )
+            self.assertEqual(wrong_entity_report["published_audited"], 1)
+            self.assertEqual(wrong_entity_report["wrong_entity_publications"], 1)
+            self.assertEqual(wrong_entity_report["entity_precision"], 0.0)
+            self.assertFalse(wrong_entity_report["qualification_passed"])
+
     def test_unofficial_scraper_output_is_experimental_not_publishable(self):
         item = self.observation(platform="linkedin", signal_type="job_posting", acquisition_mode="jobspy_experiment")
         self.assertFalse(publishable_observation(item))
