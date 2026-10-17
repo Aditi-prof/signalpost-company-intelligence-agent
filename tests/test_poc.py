@@ -31,7 +31,7 @@ from norway_company_agent.website import _extraction_state, _priority_links, _so
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
 from bs4 import BeautifulSoup  # noqa: E402
-from scripts.build_prototype import compact as compact_prototype, qualification_copy  # noqa: E402
+from scripts.build_prototype import build as build_prototype, compact as compact_prototype, qualification_copy, requested_modes  # noqa: E402
 from scripts.run_brave_discovery import brave_search  # noqa: E402
 from scripts.run_annual_report_workforce_connector import extract_candidate, needs_ocr  # noqa: E402
 from scripts.normalize_google_maps_results import candidate_score  # noqa: E402
@@ -1242,6 +1242,291 @@ class ResearchAgentTests(unittest.TestCase):
 
 
 class PrototypeTests(unittest.TestCase):
+    @staticmethod
+    def company_row(**changes):
+        row = {
+            "organisation_number": "923609016",
+            "name": "Example AS",
+            "legal_form": "AS",
+            "employees": 12,
+            "municipality": "OSLO",
+            "industry_code": "62.010",
+            "industry_label": "Computer programming activities",
+            "website": "https://example.test",
+            "bankrupt": False,
+            "liquidating": False,
+            "evidence": {
+                "registry": evidence("registry", "available", "official_registry_bulk", "https://registry.example/entity/923609016"),
+                "financials": evidence("financials", "available", "official_annual_accounts", "https://registry.example/accounts/923609016", value={
+                    "records": [
+                        {"period": {"tilDato": "2024-12-31"}, "currency": "NOK", "revenue": 100, "operating_result": 10, "annual_result": 7},
+                        {"period": {"tilDato": "2025-12-31"}, "currency": "NOK", "revenue": 200, "operating_result": 20, "annual_result": 15},
+                    ]
+                }),
+                "roles": evidence("roles", "available", "official_company_roles", "https://registry.example/roles/923609016", value={"roles": [
+                    {"name": "Ada Nord", "role": "Chair", "inactive": False},
+                    {"name": "Inactive Person", "role": "Director", "inactive": True},
+                ]}),
+                "locations": evidence("locations", "available", "official_subunits", "https://registry.example/subunits/923609016", value={"locations": [
+                    {"name": "Example Oslo", "address": {"kommune": "OSLO"}},
+                    {"name": "Example Bergen", "address": {"kommune": "BERGEN"}},
+                ]}),
+            },
+        }
+        row.update(changes)
+        return row
+
+    def test_overview_includes_available_registry_financial_role_and_subunit_facts(self):
+        company = compact_prototype(self.company_row())
+        overview = company["overviewHtml"]
+        self.assertIn("Example AS", overview)
+        self.assertIn("AS", overview)
+        self.assertIn("923609016", overview)
+        self.assertIn("OSLO", overview)
+        self.assertIn("62.010", overview)
+        self.assertIn("Computer programming activities", overview)
+        self.assertIn("Registry employee count:</strong> 12", overview)
+        self.assertIn("200 NOK", overview)
+        self.assertIn("20 NOK", overview)
+        self.assertIn("15 NOK", overview)
+        self.assertIn("Ada Nord", overview)
+        self.assertNotIn("Inactive Person", overview)
+        self.assertIn("2 registered operating subunit(s)", overview)
+
+    def test_general_overview_has_one_well_formed_evidence_section_per_topic(self):
+        overview = compact_prototype(self.company_row())["overviewHtml"]
+        document = BeautifulSoup(overview, "html.parser")
+        self.assertEqual(len(document.select("section.agent-overview")), 1)
+        for heading in (
+            "Official registry evidence",
+            "Latest normalized annual-account figures for the period ending 2025-12-31",
+            "Active registered leadership",
+            "Registered locations",
+            "Experimental external signals",
+        ):
+            with self.subTest(heading=heading):
+                self.assertEqual(
+                    [item.get_text(" ", strip=True) for item in document.find_all("h5")].count(heading),
+                    1,
+                )
+        visible_text = document.get_text(" ", strip=True)
+        self.assertNotIn("Saved workspacPublic activity", visible_text)
+        self.assertNotIn("nnual result", visible_text.replace("Annual result:", ""))
+        self.assertEqual(visible_text.count("Annual result:"), 1)
+
+    def test_overview_question_routes_to_only_one_answer_despite_module_terms(self):
+        question = (
+            "Give me a complete overview of this company, including financials, "
+            "locations, leadership, LinkedIn, hiring, public activity and sentiment"
+        )
+        self.assertEqual(requested_modes(question), ["overview"])
+        overview = compact_prototype(self.company_row())["overviewHtml"]
+        self.assertIn("200 NOK", overview)
+        self.assertIn("Ada Nord", overview)
+
+        document = build_prototype([self.company_row()], None)
+        self.assertIn(
+            "return ['overview'];\n const match=routes.find",
+            document,
+        )
+        self.assertIn('data-answer-mode="${esc(mode)}"', document)
+
+    def test_single_module_questions_route_to_exactly_one_answer(self):
+        questions = {
+            "How much revenue does it make?": ["financials"],
+            "Who is on the board?": ["leaders"],
+            "Where are its registered locations?": ["locations"],
+            "Is it hiring?": ["hiring"],
+            "What has it posted recently?": ["activity"],
+        }
+        for question, expected in questions.items():
+            with self.subTest(question=question):
+                self.assertEqual(requested_modes(question), expected)
+
+    def test_full_report_separates_categories_already_in_standalone_overview(self):
+        company = compact_prototype(self.company_row())
+        full_report_modes = requested_modes("Give me a full report on the company")
+        self.assertEqual(
+            full_report_modes,
+            ["overview", "financials", "leaders", "locations", "social", "hiring", "activity", "sentiment"],
+        )
+        self.assertEqual(len(full_report_modes), len(set(full_report_modes)))
+
+        standalone = BeautifulSoup(company["overviewHtml"], "html.parser")
+        report_summary = BeautifulSoup(company["reportOverviewHtml"], "html.parser")
+        self.assertIn("200 NOK", standalone.get_text(" ", strip=True))
+        self.assertIn("Ada Nord", standalone.get_text(" ", strip=True))
+        self.assertEqual(len(report_summary.select("h5")), 1)
+        self.assertEqual(
+            report_summary.select_one("h5").get_text(" ", strip=True),
+            "Official registry evidence",
+        )
+        report_text = report_summary.get_text(" ", strip=True)
+        self.assertNotIn("200 NOK", report_text)
+        self.assertNotIn("Ada Nord", report_text)
+        self.assertNotIn("Registered locations", report_text)
+        self.assertIn("registry.example/entity/923609016", str(report_summary))
+
+        template = build_prototype([self.company_row()], None)
+        self.assertIn("agentBody(x,mode,fullReport)", template)
+        self.assertIn("fullReport?x.reportOverviewHtml:x.overviewHtml", template)
+
+    def test_organization_role_names_render_without_python_list_syntax(self):
+        row = self.company_row()
+        row["evidence"]["roles"]["value"]["roles"][0]["name"] = ["ECONIO AS"]
+        overview = compact_prototype(row)["overviewHtml"]
+        self.assertIn("<strong>ECONIO AS</strong>", overview)
+        self.assertNotIn("['ECONIO AS']", overview)
+
+        document = build_prototype([row], None)
+        self.assertIn("displayRoleName(role.name)", document)
+        self.assertIn(".join(', ')", document)
+
+    def test_missing_employees_are_not_rendered_as_zero(self):
+        row = self.company_row(employees=None)
+        overview = compact_prototype(row)["overviewHtml"]
+        self.assertIn("Registry employee count:</strong> Not reported in the selected snapshot", overview)
+        self.assertNotIn("Registry employee count:</strong> 0", overview)
+
+    def test_reported_zero_employee_count_is_preserved(self):
+        overview = compact_prototype(self.company_row(employees=0))["overviewHtml"]
+        self.assertIn("Registry employee count:</strong> 0", overview)
+
+    def test_missing_financial_record_does_not_render_fabricated_values(self):
+        row = self.company_row()
+        row["evidence"]["financials"] = evidence(
+            "financials", "not_found", "official_annual_accounts", "https://registry.example/accounts/923609016"
+        )
+        overview = compact_prototype(row)["overviewHtml"]
+        self.assertIn("No normalized financial record is available", overview)
+        self.assertIn("missing data is not zero", overview)
+        self.assertNotIn("Revenue:</strong>", overview)
+        self.assertNotIn("200 NOK", overview)
+
+    def test_financial_disclaimer_is_neutral_for_positive_or_negative_results(self):
+        row = self.company_row()
+        overview = compact_prototype(row)["overviewHtml"]
+        self.assertIn(
+            "These are reported accounting figures, not a standalone assessment of financial health.",
+            overview,
+        )
+        document = build_prototype([row], None)
+        self.assertIn(
+            "These are reported accounting figures, not a standalone assessment of financial health.",
+            document,
+        )
+        self.assertNotIn("annual loss by itself", document)
+        self.assertNotIn("financial distress", document)
+
+    def test_linkedin_metrics_require_an_exact_company_profile_observation(self):
+        profile = {
+            "organisation_number": "923609016",
+            "platform": "linkedin",
+            "signal_type": "profile_metrics",
+            "exact_entity": False,
+            "profile_url": "https://www.linkedin.com/company/example",
+            "source_url": "https://www.linkedin.com/company/example",
+            "metrics": {"followers": 1234, "visible_employees": 56},
+        }
+        unverified = compact_prototype(self.company_row(), [profile])["overviewHtml"]
+        self.assertNotIn("1,234", unverified)
+        profile["exact_entity"] = True
+        profile["organisation_number"] = "111111111"
+        mismatched = compact_prototype(self.company_row(), [profile])["overviewHtml"]
+        self.assertNotIn("1,234", mismatched)
+        profile["organisation_number"] = "923609016"
+        verified = compact_prototype(self.company_row(), [profile])["overviewHtml"]
+        self.assertIn("1234", verified)
+        self.assertIn("56", verified)
+        self.assertIn("Experimental external signal", verified)
+
+    def test_captured_hiring_and_public_activity_are_labeled_as_experimental(self):
+        observations = [
+            {
+                "organisation_number": "923609016",
+                "platform": "linkedin",
+                "signal_type": "job_posting",
+                "exact_entity": True,
+                "source_url": "https://linkedin.example/jobs/1",
+                "metrics": {"title": "Data analyst", "location": "Oslo"},
+            },
+            {
+                "organisation_number": "923609016",
+                "platform": "linkedin",
+                "signal_type": "public_post",
+                "exact_entity": True,
+                "source_url": "https://linkedin.example/posts/1",
+                "evidence_span": "Launched a new service",
+            },
+        ]
+        overview = compact_prototype(self.company_row(), observations)["overviewHtml"]
+        self.assertIn("Captured job listings are experimental signals", overview)
+        self.assertIn("Data analyst", overview)
+        self.assertIn("Captured public posts are experimental signals", overview)
+        self.assertIn("Launched a new service", overview)
+
+    def test_unverified_website_social_links_remain_unpublished(self):
+        row = self.company_row()
+        row["evidence"]["website"] = evidence(
+            "website", "available", "company_site", "https://unverified.example", value={
+                "social_links": [{"platform": "linkedin", "url": "https://linkedin.com/company/unverified"}],
+            }
+        )
+        compacted = compact_prototype(row)
+        self.assertEqual(compacted["web"]["value"]["social_links"], [])
+        self.assertEqual(compacted["web"]["value"]["quarantined_social_count"], 1)
+        self.assertNotIn("linkedin.com/company/unverified", compacted["overviewHtml"])
+
+    def test_overview_dynamic_values_and_source_urls_are_html_escaped(self):
+        row = self.company_row(name='<img src=x onerror="alert(1)">')
+        row["evidence"]["registry"] = evidence(
+            "registry", "available", "official_registry_bulk",
+            'https://registry.example/entity?id=1&name="<x>'
+        )
+        company = compact_prototype(row)
+        overview = company["overviewHtml"]
+        self.assertIn("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;", overview)
+        self.assertNotIn('<img src=x', overview)
+        self.assertIn('href="https://registry.example/entity?id=1&amp;name=&quot;&lt;x&gt;"', overview)
+
+    def test_question_routing_selects_relevant_modules(self):
+        questions = {
+            "Tell me about this company": ["overview"],
+            "Give me a complete overview of this company": ["overview"],
+            "Give me a complete company overview": ["overview"],
+            "Give me a complete overview of this company, including financials": ["overview"],
+            "Give me a comprehensive overview of this company": ["overview"],
+            "How much revenue does it make?": ["financials"],
+            "Who runs this company?": ["leaders"],
+            "Is it hiring?": ["hiring"],
+            "What is its LinkedIn presence?": ["social"],
+            "What has it posted recently?": ["activity"],
+            "Is this a good company to work for?": ["sentiment"],
+            "Is the company financially healthy?": ["financials"],
+        }
+        for question, expected in questions.items():
+            with self.subTest(question=question):
+                self.assertEqual(requested_modes(question), expected)
+        self.assertEqual(
+            requested_modes("Give me a full report on the company"),
+            ["overview", "financials", "leaders", "locations", "social", "hiring", "activity", "sentiment"],
+        )
+        full_report_modes = requested_modes("Give me a full report on the company")
+        self.assertEqual(len(full_report_modes), len(set(full_report_modes)))
+
+    def test_generated_template_uses_one_agent_router_and_renderer(self):
+        document = build_prototype([self.company_row()], None)
+        self.assertEqual(document.count("function requestedModes("), 1)
+        self.assertEqual(document.count("function agentBody("), 1)
+        self.assertEqual(document.count("function renderAgent("), 1)
+        self.assertNotIn("baseAgentBody", document)
+        self.assertIn("output.replaceChildren();", document)
+        self.assertIn("const modes=[...new Set(", document)
+        self.assertIn('"question_intents"', document)
+        self.assertIn("function isFullReportQuestion(question)", document)
+        self.assertIn("if(isFullReportQuestion(question))", document)
+        self.assertIn("new RegExp(intents.overview,'i').test(q)", document)
+
     def test_qualification_copy_keeps_production_boundary_visible(self):
         header, boundary = qualification_copy({
             "weighted_score": {"verified_points": 100, "maximum_points": 100},
