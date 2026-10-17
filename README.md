@@ -100,6 +100,26 @@ Open-source code does not grant permission to scrape a platform. Follow each sou
 
 Read `docs/competition-control-loop.md`, `docs/external-connectors.md` and the public source policy before adding connectors.
 
+## Build the research-agent prototype
+
+After producing the local smoke profiles, build the static company-intelligence
+prototype from that existing snapshot:
+
+```bash
+uv run python scripts/build_prototype.py \
+  --input out/smoke-profiles.jsonl \
+  --output out/prototype.html
+```
+
+Serve `out` locally, then open the prototype in a browser:
+
+```bash
+python3 -m http.server 8000 --directory out
+```
+
+Open <http://localhost:8000/prototype.html>. The page uses the selected snapshot;
+it does not fetch or infer missing company facts.
+
 ## Submission contract
 
 Submit a repository with:
