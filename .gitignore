@@ -24,3 +24,9 @@ __pycache__/
 
 # macOS metadata sidecars
 ._*
+
+# Local Python package artifacts
+*.egg-info/
+
+# Decompressed registry data
+/brreg-enheter-decompressed.csv
