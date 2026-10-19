@@ -1,3 +1,8 @@
+# Participated in a hackathon for this project
+
+
+
+          
 # Signalpost reference agent
 
 This is a runnable starting point for the Signalpost company-research challenge. It is intentionally a solid baseline, not a winning submission.
@@ -119,17 +124,3 @@ python3 -m http.server 8000 --directory out
 
 Open <http://localhost:8000/prototype.html>. The page uses the selected snapshot;
 it does not fetch or infer missing company facts.
-
-## Submission contract
-
-Submit a repository with:
-
-- a 100-company smoke-test result or report;
-- one documented command that accepts a JSONL batch of organisation numbers;
-- exactly one terminal envelope per input;
-- pinned dependencies and reproducible setup;
-- a previous-snapshot input and material-change output;
-- a machine-readable run report with runtime, request count and third-party cost;
-- declared models, APIs, licences and source-rights assumptions.
-
-Email the repository URL, run command, models/APIs and expected cost per 100-company run to `submit@builderr.ai`.
